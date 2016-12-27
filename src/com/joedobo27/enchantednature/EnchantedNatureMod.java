@@ -6,6 +6,7 @@ import javassist.ClassPool;
 import javassist.NotFoundException;
 import javassist.expr.ExprEditor;
 import javassist.expr.FieldAccess;
+import javassist.expr.MethodCall;
 import org.gotti.wurmunlimited.modloader.classhooks.HookManager;
 import org.gotti.wurmunlimited.modloader.interfaces.Configurable;
 import org.gotti.wurmunlimited.modloader.interfaces.Initable;
@@ -41,10 +42,14 @@ public class EnchantedNatureMod implements WurmServerMod, Initable, Configurable
     private static ClassPool classPool;
 
     private boolean grazeNeverPacks;
+    private boolean noOverageStage;
+    private boolean fasterTreeGrowth;
 
     @Override
     public void configure(Properties properties) {
         grazeNeverPacks = Boolean.parseBoolean(properties.getProperty("grazeNeverPacks", Boolean.toString(grazeNeverPacks)));
+        noOverageStage = Boolean.parseBoolean(properties.getProperty("noOverageStage", Boolean.toString(noOverageStage)));
+        fasterTreeGrowth = Boolean.parseBoolean(properties.getProperty("fasterTreeGrowth", Boolean.toString(fasterTreeGrowth)));
     }
 
 
@@ -52,6 +57,8 @@ public class EnchantedNatureMod implements WurmServerMod, Initable, Configurable
     public void init() {
         try {
             disablePackingInGrazeNonCorrupt();
+            noOverageInCheckForTreeGrowth();
+            fasterGrowthInCheckForTreeGrowth();
         } catch (NotFoundException | CannotCompileException e) {
             logger.log(Level.WARNING, e.getMessage(), e);
         }
@@ -61,6 +68,76 @@ public class EnchantedNatureMod implements WurmServerMod, Initable, Configurable
     @Override
     public void onServerStarted() {
         JAssistClassData.voidClazz();
+    }
+
+    /**
+     * was-
+     *   final int chance = TilePoller.entryServer ? Server.rand.nextInt(20) : Server.rand.nextInt(225);
+     *
+     * becomes -
+     *   Change the 255 arg to 127 if theTile.isEnchanted() is true. This should double the chance for an enchanted
+     *   tree to age.
+     *
+     * Bytecode line 131.
+     *
+     * @throws NotFoundException JA related, forwarded.
+     * @throws CannotCompileException JA related, forwarded.
+     */
+    private void fasterGrowthInCheckForTreeGrowth() throws NotFoundException, CannotCompileException {
+        if (!fasterTreeGrowth)
+            return;
+        JAssistClassData tilePoller = JAssistClassData.getClazz("TilePoller");
+        if (tilePoller == null) {
+            tilePoller = new JAssistClassData("com.wurmonline.server.zones.TilePoller", classPool);
+        }
+        JAssistMethodData checkForTreeGrowth = new JAssistMethodData(tilePoller, "(IIIBB)V", "checkForTreeGrowth");
+        checkForTreeGrowth.getCtMethod().instrument(new ExprEditor() {
+            @Override
+            public void edit(MethodCall methodCall) throws CannotCompileException {
+                if (Objects.equals("nextInt", methodCall.getMethodName()) && methodCall.indexOfBytecode() == 131) {
+                    methodCall.replace("" +
+                            "{" +
+                                "$1 = theTile.isEnchanted() ? 127 : 255;" +
+                                "$_ = $proceed($$);" +
+                            "}");
+                }
+            }
+        });
+    }
+
+    /**
+     * was-
+     *   final byte newType2 = convertToNewType(theTile, newData2);
+     *
+     * becomes-
+     *   Change the value passed in for newData2 if the tree's age is 15. Recalculate tree age using age 14:
+     *   newData2 = (byte)((age << 4) + partdata & 0xFF);
+     *
+     * Bytecode index 391 which goes in line number 1940.
+     *
+     * @throws NotFoundException JA related, forwarded.
+     * @throws CannotCompileException JA related, forwarded.
+     */
+    private void noOverageInCheckForTreeGrowth() throws NotFoundException, CannotCompileException {
+        if (!noOverageStage)
+            return;
+        JAssistClassData tilePoller = JAssistClassData.getClazz("TilePoller");
+        if (tilePoller == null) {
+            tilePoller = new JAssistClassData("com.wurmonline.server.zones.TilePoller", classPool);
+        }
+        JAssistMethodData checkForTreeGrowth = new JAssistMethodData(tilePoller, "(IIIBB)V", "checkForTreeGrowth");
+        checkForTreeGrowth.getCtMethod().instrument(new ExprEditor() {
+            @Override
+            public void edit(MethodCall methodCall) throws CannotCompileException {
+                if (Objects.equals("convertToNewType", methodCall.getMethodName()) && methodCall.getLineNumber() == 1940) {
+                    methodCall.replace("" +
+                            "{" +
+                                "$2 = age == 15 ? (byte)(((14 << 4) + partdata) & 0xFF) : newData2;" +
+                                "$_ = $proceed($$);" +
+                            "}");
+                }
+            }
+        });
     }
 
     /**
